@@ -33,11 +33,14 @@ def load_npy_params(npy_folder):
     
     return params
 
-def create_camera_yaml(camera_idx, K, D, R, resolution=(1920, 1080)):
+def create_camera_yaml(camera_idx, K, D, R, resolution=(1920, 1080), stereo_R=None):
     """Create YAML dictionary for one camera."""
     
     # Extract focal length (average of fx and fy)
     focal = float((K[0, 0] + K[1, 1]) / 2.0)
+    
+    if stereo_R is None:
+        stereo_R = np.eye(3, dtype=np.float32)
     
     # Create the YAML structure
     camera_data = {
@@ -59,6 +62,13 @@ def create_camera_yaml(camera_idx, K, D, R, resolution=(1920, 1080)):
             'cols': 3,
             'dt': 'f',
             'data': R.astype(np.float32).flatten().tolist()
+        },
+        'StereoRMat': {
+            '__type__': 'opencv-matrix',
+            'rows': 3,
+            'cols': 3,
+            'dt': 'f',
+            'data': stereo_R.astype(np.float32).flatten().tolist()
         },
         'EYEMat': {
             '__type__': 'opencv-matrix',
@@ -114,6 +124,21 @@ def write_yaml_with_opencv_format(filepath, data):
                 f.write('       ')
             f.write(f'{rmat_data[i]}, {rmat_data[i+1]}, {rmat_data[i+2]}')
             if i < len(rmat_data) - 3:
+                f.write(',\n')
+        f.write(' ]\n')
+        
+        # Write StereoRMat (rotation of this camera relative to cam0 for stitching seeding)
+        f.write('StereoRMat: !!opencv-matrix\n')
+        f.write('   rows: 3\n')
+        f.write('   cols: 3\n')
+        f.write('   dt: f\n')
+        srmat_data = data["StereoRMat"]["data"]
+        f.write('   data: [ ')
+        for i in range(0, len(srmat_data), 3):
+            if i > 0:
+                f.write('       ')
+            f.write(f'{srmat_data[i]}, {srmat_data[i+1]}, {srmat_data[i+2]}')
+            if i < len(srmat_data) - 3:
                 f.write(',\n')
         f.write(' ]\n')
         
@@ -199,19 +224,36 @@ Examples:
     print(f"Relative Translation T: {params['T'].flatten()}")
     print(f"{'='*60}\n")
     
-    # Camera 0 (left): use identity rotation (reference frame)
+    # Both cameras use identity rotation — we only load intrinsics (K, D).
+    # The stereo R from R.npy encodes the inter-camera angle and should NOT
+    # be baked into the per-camera YAML; undistortion is applied independently
+    # per camera, matching the generate_dewarp_maps(R=np.eye(3)) approach.
     R0 = np.eye(3, dtype=np.float32)
-    
-    # Camera 1 (right): use relative rotation R
-    R1 = params['R'].astype(np.float32)
+    R1 = np.eye(3, dtype=np.float32)
     
     print(f"Resolution: {resolution[0]}x{resolution[1]}")
     print(f"Output folder: '{output_folder}'\n")
     
-    # Create YAML data for both cameras
     print("Generating YAML files...")
-    cam0_data = create_camera_yaml(0, params['K1'], params['D1'], R0, resolution)
-    cam1_data = create_camera_yaml(1, params['K2'], params['D2'], R1, resolution)
+    # StereoRMat encodes the rotation of each camera in the panorama.
+    # Cam0 = identity (reference camera).
+    # Cam1 = full R from stereo calibration (R.npy = rotation from cam0 to cam1).
+    #
+    # The C++ pipeline uses StereoRMat as the initial seed for bundle
+    # adjustment (BundleAdjusterReproj), which refines rotation + ppx/ppy
+    # using feature matches.  Passing the full R (including pitch/roll from
+    # the physical mount) gives the BA the best starting point.
+    R_full = params['R'].astype(np.float32)
+    
+    # Decompose for logging
+    yaw   = np.degrees(np.arctan2(R_full[0, 2], R_full[2, 2]))
+    pitch = np.degrees(np.arcsin(np.clip(-R_full[1, 2], -1, 1)))
+    roll  = np.degrees(np.arctan2(R_full[1, 0], R_full[1, 1]))
+    print(f"Stereo R decomposition: yaw={yaw:.2f}°, pitch={pitch:.2f}°, roll={roll:.2f}°")
+    print(f"Full R:\n{R_full}")
+
+    cam0_data = create_camera_yaml(0, params['K1'], params['D1'], R0, resolution, stereo_R=np.eye(3, dtype=np.float32))
+    cam1_data = create_camera_yaml(1, params['K2'], params['D2'], R1, resolution, stereo_R=R_full)
     
     # Write to YAML files (no suffix in filename, folder distinguishes them)
     output_file_0 = os.path.join(output_folder, 'camchain_0.yaml')
@@ -225,8 +267,9 @@ Examples:
     print(f"✓ Created: {output_file_1}")
     print(f"{'='*60}")
     print("\nYAML files generated successfully!")
-    print("\nNote: Camera 0 uses identity rotation (reference frame)")
-    print("      Camera 1 uses relative rotation from stereo calibration")
+    print("\nNote: Cam0 uses identity rotation (reference). Cam1 uses the full")
+    print("      stereo R as the StereoRMat seed. The C++ pipeline's bundle")
+    print("      adjuster will refine rotation + ppx/ppy from this seed.")
     print(f"\nTo use these files, run:")
     print(f"  ./switch_calibration.sh {output_folder}")
 
