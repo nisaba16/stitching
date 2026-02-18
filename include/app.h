@@ -8,10 +8,11 @@
 #include "sensor_data_interface.h"
 #include "stitching_param_generator.h"
 #include "opencv2/stitching/detail/blenders.hpp"
+#include "opencv2/stitching/detail/exposure_compensate.hpp"
 
 class App {
 public:
-    App(const std::vector<std::string>& video_files, const std::string& output_folder, const std::string& file_name, double fps, bool dry_run, bool use_lir, bool use_calibration, bool use_sift, bool use_feature_mask);
+    App(const std::vector<std::string>& video_files, const std::string& output_folder, const std::string& file_name, double fps, bool dry_run, bool use_lir, bool use_calibration, const std::string& feature_method, bool use_feature_mask);
     void run_stitching();
 
 private:
@@ -25,10 +26,12 @@ private:
     bool dry_run_;
     bool use_lir_;
     bool use_calibration_;
-    bool use_sift_;
+    std::string feature_method_;  // "SIFT", "ORB", or "LSD"
     bool use_feature_mask_;
     cv::Ptr<cv::detail::Blender> blender_;
+    cv::Ptr<cv::detail::ExposureCompensator> exposure_compensator_;
     std::vector<cv::Point> corners_;
+    std::vector<cv::Size> warped_sizes_;
     std::vector<cv::Size> sizes_;
 };
 

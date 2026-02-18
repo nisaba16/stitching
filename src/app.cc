@@ -11,8 +11,8 @@
 #include <opencv2/imgproc.hpp>
 #include <chrono>
 
-App::App(const std::vector<std::string>& video_files, const std::string& output_folder, const std::string& file_name, double fps, bool dry_run, bool use_lir, bool use_calibration, bool use_sift, bool use_feature_mask)
-    : sensor_data_interface_(video_files), output_folder_(output_folder), file_name_(file_name), fps_(fps), dry_run_(dry_run), use_lir_(use_lir), use_calibration_(use_calibration), use_sift_(use_sift), use_feature_mask_(use_feature_mask) {
+App::App(const std::vector<std::string>& video_files, const std::string& output_folder, const std::string& file_name, double fps, bool dry_run, bool use_lir, bool use_calibration, const std::string& feature_method, bool use_feature_mask)
+    : sensor_data_interface_(video_files), output_folder_(output_folder), file_name_(file_name), fps_(fps), dry_run_(dry_run), use_lir_(use_lir), use_calibration_(use_calibration), feature_method_(feature_method), use_feature_mask_(use_feature_mask) {
 
     sensor_data_interface_.InitVideoCapture();
     
@@ -37,7 +37,7 @@ App::App(const std::vector<std::string>& video_files, const std::string& output_
         first_image_vector[i].copyTo(first_mat_vector[i]);
     }
 
-    StitchingParamGenerator stitching_param_generator(first_mat_vector, use_calibration_, use_sift_, use_feature_mask_);
+    StitchingParamGenerator stitching_param_generator(first_mat_vector, use_calibration_, feature_method_, use_feature_mask_);
 
     stitching_param_generator.GetReprojParams(
         undist_xmap_vector,
@@ -54,8 +54,10 @@ App::App(const std::vector<std::string>& video_files, const std::string& output_
         reproj_ymap_vector
     );
     
+    exposure_compensator_ = stitching_param_generator.GetExposureCompensator();
     blender_ = stitching_param_generator.GetBlender();
     corners_ = stitching_param_generator.GetCorners();
+    warped_sizes_ = stitching_param_generator.GetWarpedSizes();
 
     // Calculate the actual bounding box of all ROIs (they may overlap)
     int min_x = INT_MAX, max_x = 0;
@@ -227,11 +229,20 @@ void App::run_stitching() {
             warped_image,
             warped_mask
         );
-        blender_->feed(warped_image, warped_mask, corners_[img_idx]);
+        // Apply exposure compensation to equalize brightness between cameras
+        exposure_compensator_->apply(img_idx, corners_[img_idx], warped_image, warped_mask);
+        // Blender::feed() requires CV_16SC3
+        cv::UMat warped_16s;
+        warped_image.convertTo(warped_16s, CV_16SC3);
+        blender_->feed(warped_16s, warped_mask, corners_[img_idx]);
     }
 
     cv::Mat blended_mask;
     blender_->blend(blended_frame, blended_mask);
+    // blend() outputs CV_16SC3 — convert back to CV_8UC3 for display/save
+    blended_frame.convertTo(blended_frame, CV_8UC3);
+    // Re-prepare blender for subsequent frames
+    blender_->prepare(corners_, warped_sizes_);
 
 
     if (dry_run_) {
@@ -337,6 +348,10 @@ void App::run_stitching() {
     }
 
     // Write first frame
+    // Ensure frame is in correct format (CV_8U) before writing
+    if (cropped_frame.type() != CV_8UC3) {
+        cropped_frame.convertTo(cropped_frame, CV_8UC3);
+    }
     video_writer_.write(cropped_frame);
 
     // Continue with remaining frames for normal run
@@ -356,10 +371,19 @@ void App::run_stitching() {
                 warped_image,
                 warped_mask
             );
-            blender_->feed(warped_image, warped_mask, corners_[img_idx]);
+            // Apply exposure compensation to equalize brightness between cameras
+            exposure_compensator_->apply(img_idx, corners_[img_idx], warped_image, warped_mask);
+            // Blender::feed() requires CV_16SC3
+            cv::UMat warped_16s;
+            warped_image.convertTo(warped_16s, CV_16SC3);
+            blender_->feed(warped_16s, warped_mask, corners_[img_idx]);
         }
 
         blender_->blend(blended_frame, blended_mask);
+        // blend() outputs CV_16SC3 — convert back to CV_8UC3
+        blended_frame.convertTo(blended_frame, CV_8UC3);
+        // Re-prepare blender for next frame (blend() consumes its internal buffers)
+        blender_->prepare(corners_, warped_sizes_);
         cropped_frame = use_lir_ ? blended_frame(crop_rect) : blended_frame;
 
         // Apply same scaling as the first frame
@@ -369,6 +393,10 @@ void App::run_stitching() {
             cropped_frame = scaled_frame;
         }
         
+        // Ensure frame is in correct format (CV_8U) before writing
+        if (cropped_frame.type() != CV_8UC3) {
+            cropped_frame.convertTo(cropped_frame, CV_8UC3);
+        }
         video_writer_.write(cropped_frame);
 
         frame_count++;
@@ -417,12 +445,12 @@ void App::run_stitching() {
 int main(int argc, char* argv[]) {
     if (argc < 11) {  // At least 10 arguments + program name
         std::cerr << "Usage: " << argv[0] 
-                  << " <output_folder> <file_name> <fps> <dry_run> <use_lir> <use_calibration> <use_sift> <use_feature_mask> <video_file1> <video_file2> ..." 
+                  << " <output_folder> <file_name> <fps> <dry_run> <use_lir> <use_calibration> <feature_method> <use_feature_mask> <video_file1> <video_file2> ..." 
                   << std::endl;
         std::cerr << "  dry_run: true/false" << std::endl;
         std::cerr << "  use_lir: true/false" << std::endl;
         std::cerr << "  use_calibration: true (use YAML files) / false (calibrate on-the-fly)" << std::endl;
-        std::cerr << "  use_sift: true (SIFT - accurate) / false (ORB - fast)" << std::endl;
+        std::cerr << "  feature_method: SIFT (accurate) / ORB (fast) / AKAZE (binary, robust)" << std::endl;
         std::cerr << "  use_feature_mask: true/false" << std::endl;
         return 1;
     }
@@ -433,7 +461,7 @@ int main(int argc, char* argv[]) {
     bool dry_run = (std::string(argv[4]) == "true");
     bool use_lir = (std::string(argv[5]) == "true");
     bool use_calibration = (std::string(argv[6]) == "true");
-    bool use_sift = (std::string(argv[7]) == "true");
+    std::string feature_method = argv[7];  // "SIFT", "ORB", or "LSD"
     bool use_feature_mask = (std::string(argv[8]) == "true");
     
     std::vector<std::string> video_files;
@@ -442,7 +470,7 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        App app(video_files, output_folder, file_name, fps, dry_run, use_lir, use_calibration, use_sift, use_feature_mask);
+        App app(video_files, output_folder, file_name, fps, dry_run, use_lir, use_calibration, feature_method, use_feature_mask);
         app.run_stitching();
     } catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;
