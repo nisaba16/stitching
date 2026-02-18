@@ -59,7 +59,7 @@ The wrapper script automatically:
 ```bash
 $ mkdir build && cd build
 $ cmake .. && make
-$ ./image-stitching <output_folder> <file_name> <fps> <dry_run> <use_lir> <use_calibration> <use_sift> <video_file1> <video_file2>
+$ ./image-stitching <output_folder> <file_name> <fps> <dry_run> <use_lir> <use_calibration> <feature_method> <use_feature_mask> <video_file1> <video_file2>
 ```
 
 Parameters:
@@ -69,19 +69,25 @@ Parameters:
 - `dry_run`: `true` to process without saving output, `false` to save
 - `use_lir`: `true` to use Largest Interior Rectangle cropping, `false` otherwise
 - `use_calibration`: `true` to use YAML calibration files from `params/`, `false` for on-the-fly calibration
-- `use_sift`: `true` for SIFT feature detector (accurate), `false` for ORB (fast)
+- `feature_method`: Feature detector to use — `SIFT` (accurate), `ORB` (fast), or `LSD` (line segments)
+- `use_feature_mask`: `true` to restrict feature detection to overlap regions, `false` otherwise
 - `video_file1`, `video_file2`: Paths to the two input video files
 
 ### Examples
 
 Using calibration files with SIFT (requires `params/camchain_*.yaml`):
 ```bash
-./image-stitching ../results stitched_video 30 false false true true /path/to/left.mp4 /path/to/right.mp4
+./image-stitching ../results stitched_video 30 false false true SIFT false /path/to/left.mp4 /path/to/right.mp4
 ```
 
 On-the-fly calibration with ORB (no YAML files needed):
 ```bash
-./image-stitching ../results stitched_video 30 false false false false /path/to/left.mp4 /path/to/right.mp4
+./image-stitching ../results stitched_video 30 false false false ORB false /path/to/left.mp4 /path/to/right.mp4
+```
+
+With LSD feature detector and feature mask:
+```bash
+./image-stitching ../results stitched_video 30 false false true LSD true /path/to/left.mp4 /path/to/right.mp4
 ```
 
 ## Calibration Management
@@ -116,7 +122,7 @@ The project supports multiple calibration parameter sets stored in separate fold
 
 4. **Run stitching**: The active calibration in `params/` will be used
    ```bash
-   ./image-stitching ../results output 30 false false true true ../datasets/match_20260215_1520_cam0_0001.mp4 ../datasets/match_20260215_1520_cam1_0001.mp4
+   ./image-stitching ../results output 30 false false true SIFT false ../datasets/match_20260215_1520_cam0_0001.mp4 ../datasets/match_20260215_1520_cam1_0001.mp4
    ```
 
 ### Calibration Folder Structure
@@ -151,11 +157,11 @@ python convert_npy_to_yaml.py params_npy_v2 params_v2
 
 # Test with v1 calibration
 ./switch_calibration.sh params_v1
-./image-stitching ../results test_v1 30 false false true true left.mp4 right.mp4
+./image-stitching ../results test_v1 30 false false true SIFT false left.mp4 right.mp4
 
 # Test with v2 calibration
 ./switch_calibration.sh params_v2
-./image-stitching ../results test_v2 30 false false true true left.mp4 right.mp4
+./image-stitching ../results test_v2 30 false false true SIFT false left.mp4 right.mp4
 
 # Compare results and keep the best one
 ```
