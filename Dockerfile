@@ -4,7 +4,7 @@ FROM ubuntu:22.04
 # Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies
+# Install dependencies including AWS CLI
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
@@ -12,7 +12,15 @@ RUN apt-get update && apt-get install -y \
     libopencv-dev \
     opencv-data \
     ffmpeg \
+    curl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install AWS CLI v2
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
+    && unzip awscliv2.zip \
+    && ./aws/install \
+    && rm -rf awscliv2.zip aws
 
 # Set working directory
 WORKDIR /app

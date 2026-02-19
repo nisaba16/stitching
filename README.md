@@ -1,46 +1,66 @@
-# Fast panorama stitching method using UMat.
+# Stereo Video Stitching
 
-Code is based on the following work, but it is heavily modified version of it. The modifications include:
+Real-time panoramic video stitching for two side-by-side cameras with stereo calibration support.
 
-- Use always only two input videos
-- Use LIR
-- Change the logic of video reading to get rid of semaphores
-- Add a dry run mode
-- Add a mode to output the intermediate images
-- Fix issues related to infinite stitching loop in the original code
-- And some other minor changes
+## Table of Contents
 
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+  - [Docker (Recommended)](#docker-recommended)
+  - [Local Build](#local-build)
+- [Usage](#usage)
+  - [Command Line Parameters](#command-line-parameters)
+  - [Feature Detectors](#feature-detectors)
+  - [Examples](#examples)
+- [Calibration](#calibration)
+  - [Converting NPY to YAML](#converting-npy-to-yaml)
+  - [Switching Calibrations](#switching-calibrations)
+  - [Folder Structure](#folder-structure)
+- [Debug Outputs](#debug-outputs)
+- [Troubleshooting](#troubleshooting)
+- [Credits](#credits)
 
-Paper: 
+---
 
-> Du, Chengyao, et al. (2020). GPU based parallel optimization for real time panoramic video stitching. Pattern Recognition Letters, 133, 62-69.
- 
+## Quick Start
 
-Repository:
+**With Docker (simplest):**
+```bash
+docker build -t image-stitching:latest .
+docker run -v /path/to/videos:/videos -v /path/to/output:/output \
+    image-stitching:latest /videos/left.mp4 /videos/right.mp4
+```
 
-> https://github.com/duchengyao/gpu-based-image-stitching
+**Local build:**
+```bash
+mkdir build && cd build
+cmake .. && make -j$(nproc)
+./image-stitching ../results stitched 30 true false true AKAZE false ../datasets/left.mp4 ../datasets/right.mp4
+```
 
+---
 
-## How to run
+## Installation
 
-### Option 1: Using Docker (Recommended - Simplest)
+### Docker (Recommended)
 
-Build the Docker image:
 ```bash
 docker build -t image-stitching:latest .
 ```
 
-Run with just the two video files (FPS is auto-detected):
+Run with auto-detected FPS:
 ```bash
-docker run -v /path/to/videos:/videos -v /path/to/output:/output image-stitching:latest /videos/left.mp4 /videos/right.mp4
+docker run -v /path/to/videos:/videos -v /path/to/output:/output \
+    image-stitching:latest /videos/left.mp4 /videos/right.mp4
 ```
 
-With custom output folder/name:
+With custom output name:
 ```bash
-docker run -v /path/to/videos:/videos -v /path/to/output:/output image-stitching:latest /videos/left.mp4 /videos/right.mp4 /output my_stitched_video
+docker run -v /path/to/videos:/videos -v /path/to/output:/output \
+    image-stitching:latest /videos/left.mp4 /videos/right.mp4 /output my_panorama
 ```
 
-If using calibration files, mount the `params` folder:
+With calibration files:
 ```bash
 docker run -v $(pwd)/params:/app/params \
            -v /path/to/videos:/videos \
@@ -48,121 +68,184 @@ docker run -v $(pwd)/params:/app/params \
            image-stitching:latest /videos/left.mp4 /videos/right.mp4
 ```
 
-The wrapper script automatically:
-- ✅ Detects FPS from the first video
-- ✅ Creates the output folder if needed
-- ✅ Detects and uses calibration files if they exist
-- ✅ Uses sensible defaults for other parameters
+### Local Build
 
-### Option 2: Local Build
+**Requirements:** OpenCV 4.x with contrib modules, CMake 3.10+
 
 ```bash
-$ mkdir build && cd build
-$ cmake .. && make
-$ ./image-stitching <output_folder> <file_name> <fps> <dry_run> <use_lir> <use_calibration> <feature_method> <use_feature_mask> <video_file1> <video_file2>
+mkdir build && cd build
+cmake .. && make -j$(nproc)
 ```
 
-Parameters:
-- `output_folder`: Directory to save the stitched video
-- `file_name`: Output file name (without extension)
-- `fps`: Frames per second for output video
-- `dry_run`: `true` to process without saving output, `false` to save
-- `use_lir`: `true` to use Largest Interior Rectangle cropping, `false` otherwise
-- `use_calibration`: `true` to use YAML calibration files from `params/`, `false` for on-the-fly calibration
-- `feature_method`: Feature detector to use — `SIFT` (accurate), `ORB` (fast), or `LSD` (line segments)
-- `use_feature_mask`: `true` to restrict feature detection to overlap regions, `false` otherwise
-- `video_file1`, `video_file2`: Paths to the two input video files
+---
+
+## Usage
+
+```bash
+./image-stitching <output_folder> <file_name> <fps> <dry_run> <use_lir> <use_calibration> <feature_method> <use_feature_mask> <video1> <video2>
+```
+
+### Command Line Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `output_folder` | path | Directory for output files |
+| `file_name` | string | Output filename (without extension) |
+| `fps` | int | Output video frame rate |
+| `dry_run` | bool | `true` = test first frame only, `false` = process full video |
+| `use_lir` | bool | `true` = crop to largest interior rectangle |
+| `use_calibration` | bool | `true` = use `params/*.yaml`, `false` = estimate on-the-fly |
+| `feature_method` | string | `SIFT`, `AKAZE`, or `ORB` |
+| `use_feature_mask` | bool | `true` = detect features only in overlap zone |
+| `video1`, `video2` | path | Input video files (left, right) |
+
+### Feature Detectors
+
+| Detector | Speed | Accuracy | Best For |
+|----------|-------|----------|----------|
+| **AKAZE** | Fast | Good | General use, recommended default |
+| **SIFT** | Slow | Excellent | Difficult scenes, high texture variation |
+| **ORB** | Very fast | Moderate | Real-time when speed is critical |
+
+The pipeline automatically:
+- Applies **CLAHE** contrast enhancement for better matching on uniform surfaces (grass)
+- Uses **overlap-aware masking** to focus features in the shared field of view
+- Runs **bundle adjustment** with rotation sanity checks to prevent drift
 
 ### Examples
 
-Using calibration files with SIFT (requires `params/camchain_*.yaml`):
+**Dry run** (test with first frame, saves preview image):
 ```bash
-./image-stitching ../results stitched_video 30 false false true SIFT false /path/to/left.mp4 /path/to/right.mp4
+./image-stitching ../results test 30 true false true AKAZE false left.mp4 right.mp4
+# Output: ../results/dry_run_test.jpg
 ```
 
-On-the-fly calibration with ORB (no YAML files needed):
+**Full video with calibration:**
 ```bash
-./image-stitching ../results stitched_video 30 false false false ORB false /path/to/left.mp4 /path/to/right.mp4
+./image-stitching ../results match_stitched 30 false false true AKAZE false \
+    ../datasets/match_cam0.mp4 ../datasets/match_cam1.mp4
 ```
 
-With LSD feature detector and feature mask:
+**Without calibration** (estimates from features):
 ```bash
-./image-stitching ../results stitched_video 30 false false true LSD true /path/to/left.mp4 /path/to/right.mp4
+./image-stitching ../results output 30 false false false SIFT false left.mp4 right.mp4
 ```
 
-## Calibration Management
+**With LIR cropping** (removes black borders):
+```bash
+./image-stitching ../results output 30 false true true AKAZE false left.mp4 right.mp4
+```
 
-The project supports multiple calibration parameter sets stored in separate folders that can be easily switched between.
+---
 
-### Calibration Workflow
+## Calibration
 
-1. **Organize calibration data**: Store stereo calibration `.npy` files in a folder (e.g., `params_npy/`)
-   - Required files: `cameraMatrix1.npy`, `cameraMatrix2.npy`, `distCoeffs1.npy`, `distCoeffs2.npy`, `R.npy`, `T.npy`
+The stitcher uses stereo calibration parameters (`K`, `D`, `R`) for accurate undistortion and alignment.
 
-2. **Convert to YAML format**: Run the conversion script specifying input and output folders
-   ```bash
-   # Convert params_npy to params_v1 folder
-   python convert_npy_to_yaml.py params_npy params_v1
-   # Creates: params_v1/camchain_0.yaml, params_v1/camchain_1.yaml
-   
-   # Convert with custom resolution
-   python convert_npy_to_yaml.py my_calibration params_v2 --resolution 1920x1080
-   # Creates: params_v2/camchain_0.yaml, params_v2/camchain_1.yaml
-   ```
+### Converting NPY to YAML
 
-3. **Switch between calibrations**: Use the switch script to activate a calibration folder
-   ```bash
-   # List available calibrations
-   ./switch_calibration.sh
-   
-   # Switch to a specific calibration folder (e.g., params_v1, params_v2, params_old)
-   ./switch_calibration.sh params_v1
-   ```
-   This copies files from the specified folder to `params/` (active calibration used by stitching)
+If you have NumPy calibration files from stereo calibration:
 
-4. **Run stitching**: The active calibration in `params/` will be used
-   ```bash
-   ./image-stitching ../results output 30 false false true SIFT false ../datasets/match_20260215_1520_cam0_0001.mp4 ../datasets/match_20260215_1520_cam1_0001.mp4
-   ```
+```bash
+python convert_npy_to_yaml.py <input_folder> <output_folder> [--resolution WxH]
+```
 
-### Calibration Folder Structure
+**Required NPY files:**
+- `cameraMatrix1.npy`, `cameraMatrix2.npy` — intrinsic matrices
+- `distCoeffs1.npy`, `distCoeffs2.npy` — distortion coefficients  
+- `R.npy` — stereo rotation matrix (cam0 → cam1)
+- `T.npy` — stereo translation vector
 
-Each calibration folder contains:
-- `camchain_0.yaml` - Left camera parameters (K matrix, distortion, rotation)
-- `camchain_1.yaml` - Right camera parameters
+**Example:**
+```bash
+python convert_npy_to_yaml.py params_npy params_v1 --resolution 1640x1232
+```
 
-Example structure:
+### Switching Calibrations
+
+Store multiple calibration sets and switch between them:
+
+```bash
+# List available calibrations
+./switch_calibration.sh
+
+# Activate a calibration set
+./switch_calibration.sh params_v1
+```
+
+### Folder Structure
+
 ```
 stitching/
-├── params/              # Active calibration (used by stitching algorithm)
+├── params/              # ← Active calibration (used by stitcher)
 │   ├── camchain_0.yaml
 │   └── camchain_1.yaml
-├── params_v1/           # Calibration version 1
-│   ├── camchain_0.yaml
-│   └── camchain_1.yaml
-├── params_v2/           # Calibration version 2
-│   ├── camchain_0.yaml
-│   └── camchain_1.yaml
+├── params_v1/           # Calibration set 1
+├── params_v2/           # Calibration set 2
 └── params_npy/          # Source .npy files
     ├── cameraMatrix1.npy
-    ├── cameraMatrix2.npy
+    ├── R.npy
     └── ...
 ```
 
-### Example Workflow
-```bash
-# Convert multiple calibration sets
-python convert_npy_to_yaml.py params_npy_v1 params_v1
-python convert_npy_to_yaml.py params_npy_v2 params_v2
+---
 
-# Test with v1 calibration
-./switch_calibration.sh params_v1
-./image-stitching ../results test_v1 30 false false true SIFT false left.mp4 right.mp4
+## Debug Outputs
 
-# Test with v2 calibration
-./switch_calibration.sh params_v2
-./image-stitching ../results test_v2 30 false false true SIFT false left.mp4 right.mp4
+When running, the stitcher saves diagnostic images in the output folder:
 
-# Compare results and keep the best one
-```
+| File | Description |
+|------|-------------|
+| `debug_features_0.jpg`, `debug_features_1.jpg` | Detected keypoints per camera |
+| `debug_matches_0_1.jpg` | Feature matches between cameras (inliers in green) |
+| `debug_overlap_mask_0.jpg`, `debug_overlap_mask_1.jpg` | Overlap region used for feature search |
+| `debug_warped_0.jpg`, `debug_warped_1.jpg` | Cylindrically warped images |
+| `debug_camera_params.txt` | Final K and R matrices after bundle adjustment |
+| `debug_roi_info.txt` | ROI sizes and overlap calculations |
+| `dry_run_*.jpg` | Preview of stitched output (dry run mode) |
+
+---
+
+## Troubleshooting
+
+### Few feature matches / poor alignment
+
+- Use `SIFT` instead of `AKAZE` for difficult scenes
+- Ensure cameras have 20-40% overlap
+- Check `debug_matches_0_1.jpg` — green lines should connect corresponding features
+
+### Bundle adjustment reverts to calibration
+
+If you see `"WARNING: rotation deviated X° from seed"`:
+- This means feature matching was unreliable and the stitcher fell back to calibrated rotation
+- Usually fine — the calibration is correct, just feature matching was weak
+- To improve: ensure better lighting, more texture in overlap zone
+
+### Warping looks wrong at edges
+
+- Verify calibration files match the actual camera setup
+- Check that `R.npy` represents cam0→cam1 rotation (not inverted)
+- Run dry run and inspect `debug_warped_*.jpg`
+
+### Black borders in output
+
+- Enable LIR cropping: set `use_lir` to `true`
+- Or post-process with FFmpeg: `ffmpeg -i output.mp4 -vf "crop=W:H:X:Y" cropped.mp4`
+
+---
+
+## Credits
+
+Based on:
+
+> Du, Chengyao, et al. (2020). *GPU based parallel optimization for real time panoramic video stitching.* Pattern Recognition Letters, 133, 62-69.
+
+Original repository: https://github.com/duchengyao/gpu-based-image-stitching
+
+**Modifications:**
+- Two-camera stereo mode with calibration file support
+- CLAHE preprocessing + overlap-aware feature masking
+- Bundle adjustment with rotation sanity checks
+- Multi-band blending with exposure compensation
+- Dry run mode and debug visualizations
 
