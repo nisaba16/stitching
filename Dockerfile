@@ -28,8 +28,8 @@ WORKDIR /app
 # Copy the project files
 COPY . .
 
-# Make the wrapper script executable
-RUN chmod +x run.sh
+# Make scripts executable
+RUN chmod +x run.sh entrypoint.sh
 
 # Create build directory and build the project
 RUN mkdir -p build && \
@@ -37,5 +37,5 @@ RUN mkdir -p build && \
     cmake .. && \
     make
 
-# Set the entrypoint to the wrapper script
-ENTRYPOINT ["./run.sh"]
+# Set the entrypoint to the Batch wrapper (downloads from S3, stitches, uploads to S3)
+ENTRYPOINT ["./entrypoint.sh"]

@@ -76,24 +76,6 @@ RESULT_FILE="$OUTPUT_FOLDER/$OUTPUT_NAME.mp4"
 # Check if stitching was successful
 if [ -f "$RESULT_FILE" ]; then
     echo "Stitching complete! Output file: $RESULT_FILE"
-    
-    # Upload to S3 if AWS credentials are provided
-    if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && [ -n "$MATCH_UUID" ]; then
-        echo "Uploading to S3..."
-        S3_PATH="s3://football-stitched-videos/match_${MATCH_UUID}/output.mp4"
-        
-        aws s3 cp "$RESULT_FILE" "$S3_PATH"
-        
-        if [ $? -eq 0 ]; then
-            echo "Successfully uploaded to: $S3_PATH"
-        else
-            echo "Failed to upload to S3"
-            exit 1
-        fi
-    else
-        echo "S3 upload skipped - missing AWS credentials or MATCH_UUID"
-        echo "To upload to S3, provide: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, MATCH_UUID"
-    fi
 else
     echo "Error: Stitching failed - output file not created"
     exit 1
