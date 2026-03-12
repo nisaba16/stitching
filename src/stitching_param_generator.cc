@@ -8,6 +8,7 @@
 #include <string>
 #include <stdexcept>
 #include <cmath>
+#include "opencv2/stitching/detail/seam_finders.hpp"
 
 #define ENABLE_LOG 0
 #define LOG(msg) std::cout << msg
@@ -709,6 +710,39 @@ void StitchingParamGenerator::InitWarper() {
       }
   }
 
+  // Apply seam finding for smooth blending transitions
+  // This finds the optimal cut path between images to minimize visible seams
+  Ptr<SeamFinder> seam_finder;
+  if (seam_find_type == "no")
+      seam_finder = makePtr<NoSeamFinder>();
+  else if (seam_find_type == "voronoi")
+      seam_finder = makePtr<VoronoiSeamFinder>();
+  else if (seam_find_type == "gc_color")
+      seam_finder = makePtr<GraphCutSeamFinder>(GraphCutSeamFinderBase::COST_COLOR);
+  else if (seam_find_type == "gc_colorgrad")
+      seam_finder = makePtr<GraphCutSeamFinder>(GraphCutSeamFinderBase::COST_COLOR_GRAD);
+  else if (seam_find_type == "dp_color")
+      seam_finder = makePtr<DpSeamFinder>(DpSeamFinder::COLOR);
+  else if (seam_find_type == "dp_colorgrad")
+      seam_finder = makePtr<DpSeamFinder>(DpSeamFinder::COLOR_GRAD);
+  else
+      seam_finder = makePtr<GraphCutSeamFinder>(GraphCutSeamFinderBase::COST_COLOR_GRAD);
+
+  // Convert warped images to float for seam finding
+  std::vector<UMat> images_warped_f(num_img_);
+  for (int i = 0; i < num_img_; ++i)
+      images_warped[i].convertTo(images_warped_f[i], CV_32F);
+
+  seam_finder->find(images_warped_f, corners_, mask_warped_vector_);
+  std::cout << "[InitWarper] Applied seam finder: " << seam_find_type << std::endl;
+
+  // Dilate the seam masks slightly to create smoother gradient transitions
+  // This gives the multi-band blender more overlap to work with
+  for (int i = 0; i < num_img_; ++i) {
+      cv::dilate(mask_warped_vector_[i], mask_warped_vector_[i],
+                 cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)));
+  }
+
   timelapser_ = Timelapser::createDefault(timelapse_type);
   
   // Setup blender
@@ -716,8 +750,9 @@ void StitchingParamGenerator::InitWarper() {
   cv::detail::MultiBandBlender* mb_blender = dynamic_cast<cv::detail::MultiBandBlender*>(blender_.get());
   if (mb_blender) {
       // More bands = wider & smoother gradient transition between images.
-      // 5 bands gives a very wide, smooth blend zone that hides seams well.
-      int num_bands = 5;
+      // 7 bands gives a very wide, smooth blend zone that hides seams well.
+      // Each band represents a frequency level - more bands = smoother exponential falloff.
+      int num_bands = 7;
       mb_blender->setNumBands(num_bands);
       std::cout << "[InitWarper] Using multi-band blender with " << mb_blender->numBands() << " bands" << std::endl;
   }

@@ -123,6 +123,9 @@ The pipeline automatically:
 **Full video with calibration:**
 ```bash
 ./image-stitching ../results match_stitched 30 false false true AKAZE false \
+    ../datasets/stable_0c.mp4 ../datasets/stable_1c.mp4 
+
+./image-stitching ../results match_stitched 30 false false true AKAZE false \
     ../datasets/match_cam0.mp4 ../datasets/match_cam1.mp4
 ```
 

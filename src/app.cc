@@ -58,6 +58,7 @@ App::App(const std::vector<std::string>& video_files, const std::string& output_
     blender_ = stitching_param_generator.GetBlender();
     corners_ = stitching_param_generator.GetCorners();
     warped_sizes_ = stitching_param_generator.GetWarpedSizes();
+    seam_masks_ = stitching_param_generator.GetSeamMasks();
 
     // Calculate the actual bounding box of all ROIs (they may overlap)
     int min_x = INT_MAX, max_x = 0;
@@ -229,6 +230,10 @@ void App::run_stitching() {
             warped_image,
             warped_mask
         );
+        // Apply seam mask to define blending regions (smooth transition boundaries)
+        if (img_idx < seam_masks_.size()) {
+            cv::bitwise_and(warped_mask, seam_masks_[img_idx], warped_mask);
+        }
         // Apply exposure compensation to equalize brightness between cameras
         exposure_compensator_->apply(img_idx, corners_[img_idx], warped_image, warped_mask);
         // Blender::feed() requires CV_16SC3
@@ -371,6 +376,10 @@ void App::run_stitching() {
                 warped_image,
                 warped_mask
             );
+            // Apply seam mask to define blending regions (smooth transition boundaries)
+            if (img_idx < seam_masks_.size()) {
+                cv::bitwise_and(warped_mask, seam_masks_[img_idx], warped_mask);
+            }
             // Apply exposure compensation to equalize brightness between cameras
             exposure_compensator_->apply(img_idx, corners_[img_idx], warped_image, warped_mask);
             // Blender::feed() requires CV_16SC3

@@ -27,6 +27,7 @@ public:
   std::vector<cv::Point> GetCorners() { return corners_; }
   std::vector<cv::Size> GetWarpedSizes() { return image_warped_size_vector_; }
   cv::Ptr<cv::detail::ExposureCompensator> GetExposureCompensator() { return exposure_compensator_; }
+  std::vector<cv::UMat> GetSeamMasks() { return mask_warped_vector_; }
 
 private:
   bool use_calibration_;
@@ -44,7 +45,7 @@ private:
   cv::detail::WaveCorrectKind wave_correct = cv::detail::WAVE_CORRECT_HORIZ;
   bool save_graph = false;
   std::string save_graph_to;
-  std::string warp_type = "planar";  // cylindrical works cleanly for side-by-side cameras at large angles
+  std::string warp_type = "cylindrical";  // cylindrical works cleanly for side-by-side cameras at large angles
   int expos_comp_type = cv::detail::ExposureCompensator::GAIN_BLOCKS;
   int expos_comp_nr_feeds = 1;
   int expos_comp_nr_filtering = 2;

@@ -33,6 +33,7 @@ private:
     std::vector<cv::Point> corners_;
     std::vector<cv::Size> warped_sizes_;
     std::vector<cv::Size> sizes_;
+    std::vector<cv::UMat> seam_masks_;  // Precomputed seam masks for smooth blending
 };
 
 #endif // APP_H
