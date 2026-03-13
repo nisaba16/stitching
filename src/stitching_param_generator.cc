@@ -593,7 +593,7 @@ void StitchingParamGenerator::InitWarper() {
   Ptr<WarperCreator> warper_creator;
   if (try_cuda && cuda::getCudaEnabledDeviceCount() > 0) {
     if (warp_type == "plane")
-      warper_creator = makePtr<cv::PlaneWarper>();
+      warper_creator = makePtr<cv::PlaaneWarper>();
     else if (warp_type == "cylindrical")
       warper_creator = makePtr<cv::CylindricalWarper>();
     else if (warp_type == "spherical")
