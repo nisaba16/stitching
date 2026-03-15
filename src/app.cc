@@ -427,28 +427,46 @@ void App::run_stitching() {
         video_writer_.release();
     }
 
-    // Re-encode with FFmpeg for proper H.264 compression
+    // Re-encode with FFmpeg for proper H.264 compression. Produce both MP4 and HLS segments (streaming)
     // CRF 23 = visually transparent quality, good compression ratio
     // preset "medium" = good balance between speed and compression
+    // Single FFmpeg pass with two outputs to avoid encoding twice
+    
+    std::string final_mp4 = output_folder_ + "/" + file_name_ + ".mp4";
+    std::string hls_dir = output_folder_ + "/" + file_name_;
+    std::string mkdir_cmd = "mkdir -p \"" + hls_dir + "\"";
+    std::system(mkdir_cmd.c_str());
+
     std::string ffmpeg_cmd = "ffmpeg -y -i \"" + temp_output + "\" "
+                             "-vf scale=-2:720 "
                              "-c:v libx264 -crf 23 -preset medium "
                              "-pix_fmt yuv420p "
+                             "-c:a aac -b:a 128k "
                              "-movflags +faststart "
-                             "\"" + final_output + "\"";
+                             "\"" + final_mp4 + "\" "
+                             "-vf scale=-2:720 "
+                             "-c:v libx264 -crf 23 -preset medium "
+                             "-pix_fmt yuv420p "
+                             "-c:a aac -b:a 128k "
+                             "-hls_time 10 -hls_list_size 0 -hls_segment_type mpegts "
+                             "-hls_segment_filename \"" + hls_dir + "/segment_%04d.ts\" "
+                             "-f hls \"" + hls_dir + "/master.m3u8\"";
 
-    std::cout << "[App] Re-encoding with FFmpeg for compression..." << std::endl;
+    std::cout << "[App] Encoding to MP4 + HLS (720p)..." << std::endl;
     std::cout << "[App] Command: " << ffmpeg_cmd << std::endl;
 
     int ret = std::system(ffmpeg_cmd.c_str());
     if (ret != 0) {
-        std::cerr << "[App] WARNING: FFmpeg re-encoding failed (exit code " << ret << ")." << std::endl;
-        std::cerr << "[App] Renaming raw file as output instead." << std::endl;
-        std::rename(temp_output.c_str(), final_output.c_str());
-    } else {
-        // Remove temporary file
+        std::cerr << "[App] ERROR: FFmpeg encoding failed (exit code " << ret << ")." << std::endl;
         std::remove(temp_output.c_str());
-        std::cout << "[App] Re-encoding complete: " << final_output << std::endl;
+        throw std::runtime_error("FFmpeg encoding failed");
     }
+
+    // Remove temporary AVI file
+    std::remove(temp_output.c_str());
+    std::cout << "[App] Encoding complete:" << std::endl;
+    std::cout << "[App]   MP4: " << final_mp4 << std::endl;
+    std::cout << "[App]   HLS: " << hls_dir << "/master.m3u8" << std::endl;
 }
 
 int main(int argc, char* argv[]) {

@@ -63,7 +63,7 @@ mkdir -p "$OUTPUT_FOLDER"
 echo "Running image stitching..."
 echo "  Video 1: $VIDEO1"
 echo "  Video 2: $VIDEO2"
-echo "  Output: $OUTPUT_FOLDER/$OUTPUT_NAME.mp4"
+echo "  Output: $OUTPUT_FOLDER/$OUTPUT_NAME.mp4 + $OUTPUT_FOLDER/$OUTPUT_NAME/ (HLS)"
 echo "  FPS: $FPS"
 echo "  Calibration: $USE_CALIBRATION"
 
@@ -71,12 +71,22 @@ echo "  Calibration: $USE_CALIBRATION"
 # Parameters: output_folder, file_name, fps, dry_run, use_lir, use_calibration, use_sift, use_feature_mask, video_file1, video_file2
 /app/build/image-stitching "$OUTPUT_FOLDER" "$OUTPUT_NAME" "$FPS" false false "$USE_CALIBRATION" false false "$VIDEO1" "$VIDEO2"
 
-RESULT_FILE="$OUTPUT_FOLDER/$OUTPUT_NAME.mp4"
+MP4_FILE="$OUTPUT_FOLDER/$OUTPUT_NAME.mp4"
+HLS_DIR="$OUTPUT_FOLDER/$OUTPUT_NAME"
 
 # Check if stitching was successful
-if [ -f "$RESULT_FILE" ]; then
-    echo "Stitching complete! Output file: $RESULT_FILE"
-else
-    echo "Error: Stitching failed - output file not created"
+if [ ! -f "$MP4_FILE" ]; then
+    echo "Error: Stitching failed - MP4 output not created at $MP4_FILE"
     exit 1
 fi
+
+if [ ! -f "$HLS_DIR/master.m3u8" ]; then
+    echo "Error: Stitching failed - HLS output not created at $HLS_DIR/master.m3u8"
+    exit 1
+fi
+
+MP4_SIZE=$(du -h "$MP4_FILE" | cut -f1)
+SEGMENT_COUNT=$(ls -1 "$HLS_DIR"/*.ts 2>/dev/null | wc -l)
+echo "Stitching complete!"
+echo "  MP4:  $MP4_FILE ($MP4_SIZE)"
+echo "  HLS:  $HLS_DIR/master.m3u8 ($SEGMENT_COUNT segments)"
