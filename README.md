@@ -12,6 +12,10 @@ Real-time panoramic video stitching for two side-by-side cameras with stereo cal
   - [Command Line Parameters](#command-line-parameters)
   - [Feature Detectors](#feature-detectors)
   - [Examples](#examples)
+- [AWS Batch](#aws-batch)
+  - [Input folder convention](#input-folder-convention)
+  - [Environment variables](#environment-variables)
+  - [Job flow](#job-flow)
 - [Calibration](#calibration)
   - [Converting NPY to YAML](#converting-npy-to-yaml)
   - [Switching Calibrations](#switching-calibrations)
@@ -137,6 +141,55 @@ The pipeline automatically:
 **With LIR cropping** (removes black borders):
 ```bash
 ./image-stitching ../results output 30 false true true AKAZE false left.mp4 right.mp4
+```
+
+---
+
+## AWS Batch
+
+The Docker image is designed to run as an AWS Batch job. `entrypoint.sh` orchestrates the full pipeline: download → concatenate parts → stitch → upload.
+
+### Input folder convention
+
+Raw videos are stored in S3 as multi-part files, one set per camera:
+
+```
+s3://football-raw-videos/match_{uuid}/
+├── cam_A_20260331_2039_part000.mp4   ← left camera, part 0
+├── cam_A_20260331_2039_part001.mp4   ← left camera, part 1
+├── ...
+├── cam_B_20260331_2039_part000.mp4   ← right camera, part 0
+├── cam_B_20260331_2039_part001.mp4   ← right camera, part 1
+└── ...
+```
+
+- `cam_A` is always the **left** camera, `cam_B` the **right**.
+- Parts are sorted lexicographically before concatenation (`part000 < part001 < ...`).
+- Single-part recordings skip the FFmpeg concatenation step entirely.
+
+### Environment variables
+
+Set these via Lambda `containerOverrides` when submitting the Batch job:
+
+| Variable | Description |
+|----------|-------------|
+| `MATCH_ID` | UUID of the match |
+| `INPUT_S3_PREFIX` | S3 folder containing `cam_A_*` and `cam_B_*` parts (e.g. `s3://football-raw-videos/match_{uuid}/`) |
+| `MP4_S3_PATH` | Destination for the stitched MP4 (e.g. `s3://football-stitched-videos/match_{uuid}/match_{uuid}_stitched.mp4`) |
+| `HLS_S3_PREFIX` | Destination folder for HLS segments (e.g. `s3://vista-stream-segments/match_{uuid}`) |
+
+### Job flow
+
+1. `aws s3 sync` downloads all `cam_A_*.mp4` and `cam_B_*.mp4` parts from `INPUT_S3_PREFIX`.
+2. Each camera's parts are concatenated in order using FFmpeg stream copy (no re-encoding).
+3. The two concatenated files are passed to `run.sh` → `image-stitching`.
+4. The output MP4 is uploaded to `MP4_S3_PATH`.
+5. HLS playlist (`master.m3u8`) and segments (`*.ts`) are uploaded to `HLS_S3_PREFIX`.
+
+To build and push the image to ECR:
+
+```bash
+./build_and_push_ecr.sh
 ```
 
 ---
