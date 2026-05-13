@@ -274,11 +274,27 @@ void StitchingParamGenerator::InitCameraParam() {
             std::cout << "[DEBUG] Saved feature mask: " << mask_path << std::endl;
         }
     } else if (num_img_ == 2) {
-        // Overlap-aware masking: for a side-by-side two-camera rig SIFT should
-        // only look in the region where both views share field of view.
-        // Use 20% of image width — tighter than FOV-derived estimates to avoid
-        // features from non-shared content flooding the matcher.
-        const float overlap_frac = 0.20f;
+        // Overlap-aware masking: compute the fraction of each image that
+        // overlaps with the other camera using calibrated yaw + FOV.
+        // overlap_frac = (fov_h - |yaw|) / fov_h, clamped to [10%, 50%].
+        // Falls back to 20% when calibration is unavailable.
+        float overlap_frac = 0.20f;
+        if (use_calibration_ && camera_params_vector_[1].focal > 0 &&
+            !camera_params_vector_[1].R.empty()) {
+            float yaw = std::abs(std::atan2(
+                camera_params_vector_[1].R.at<float>(0, 2),
+                camera_params_vector_[1].R.at<float>(0, 0)));
+            float fov_h = 2.f * std::atan2(
+                image_size_vector_[0].width * 0.5f,
+                static_cast<float>(camera_params_vector_[0].focal));
+            float computed = (fov_h > 0.f) ? std::max(0.f, (fov_h - yaw) / fov_h) : 0.20f;
+            overlap_frac = std::max(0.10f, std::min(0.50f, computed));
+            std::cout << "[InitCameraParam] Overlap mask: yaw=" << yaw * 180.f / CV_PI
+                      << "° fov_h=" << fov_h * 180.f / CV_PI
+                      << "° → overlap=" << overlap_frac * 100.f << "%" << std::endl;
+        } else {
+            std::cout << "[InitCameraParam] Overlap mask: using default 20%" << std::endl;
+        }
 
         int rows0 = feature_images[0].rows, cols0 = feature_images[0].cols;
         int overlap_px_0 = static_cast<int>(cols0 * overlap_frac);
@@ -540,7 +556,7 @@ void StitchingParamGenerator::InitCameraParam() {
     // rotation is physically fixed.  If BA drifted more than MAX_ROT_DEV degrees
     // from the calibration seed, feature matching was unreliable and we fall back
     // to the known-good calibrated rotation.
-    const double MAX_ROT_DEV_DEG = 8.0;
+    const double MAX_ROT_DEV_DEG = 12.0;
     if (use_calibration_) {
         bool rotation_reverted = false;
         for (int i = 0; i < num_img_; ++i) {
@@ -748,7 +764,7 @@ void StitchingParamGenerator::InitWarper() {
       int ols = std::max(x0s, x1s);
       int ole = std::min(x0e, x1e);
 
-      if (ole > ols + 100) {
+      if (ole > ols + 50) {
           int c0 = ols - x0s;
           int c1 = ols - x1s;
           int olw = ole - ols;
@@ -779,8 +795,8 @@ void StitchingParamGenerator::InitWarper() {
 
           // HoughLinesP on white-pixel mask
           std::vector<cv::Vec4i> segs0, segs1;
-          cv::HoughLinesP(wb0, segs0, 1, CV_PI / 180.0, 30, 80, 20);
-          cv::HoughLinesP(wb1, segs1, 1, CV_PI / 180.0, 30, 80, 20);
+          cv::HoughLinesP(wb0, segs0, 1, CV_PI / 180.0, 20, 50, 20);
+          cv::HoughLinesP(wb1, segs1, 1, CV_PI / 180.0, 20, 50, 20);
           std::cout << "[Align] Line segments: cam0=" << segs0.size()
                     << " cam1=" << segs1.size() << std::endl;
 
