@@ -12,6 +12,9 @@ Real-time panoramic video stitching for two side-by-side cameras with stereo cal
   - [Command Line Parameters](#command-line-parameters)
   - [Feature Detectors](#feature-detectors)
   - [Examples](#examples)
+- [Local Folder Mode](#local-folder-mode)
+  - [Input convention](#input-convention)
+  - [Output structure](#output-structure)
 - [AWS Batch](#aws-batch)
   - [Input folder convention](#input-folder-convention)
   - [Environment variables](#environment-variables)
@@ -28,14 +31,21 @@ Real-time panoramic video stitching for two side-by-side cameras with stereo cal
 
 ## Quick Start
 
-**With Docker (simplest):**
+**Stitch a local match folder (simplest for local use):**
+```bash
+mkdir build && cd build && cmake .. && make -j$(nproc) && cd ..
+./run_folder.sh datasets/Montrouge_FC_Chaville_FC_10-05-26
+# → results/Montrouge_FC_Chaville_FC_10-05-26/stitched.mp4  +  stitched/ (HLS)
+```
+
+**With Docker:**
 ```bash
 docker build -t image-stitching:latest .
 docker run -v /path/to/videos:/videos -v /path/to/output:/output \
     image-stitching:latest /videos/left.mp4 /videos/right.mp4
 ```
 
-**Local build:**
+**Local build (two files):**
 ```bash
 mkdir build && cd build
 cmake .. && make -j$(nproc)
@@ -142,6 +152,56 @@ The pipeline automatically:
 ```bash
 ./image-stitching ../results output 30 false true true AKAZE false left.mp4 right.mp4
 ```
+
+---
+
+## Local Folder Mode
+
+`run_folder.sh` is the recommended entry point for local stitching when your input is a folder of multi-part recordings.
+
+### Input convention
+
+```
+datasets/Montrouge_FC_Chaville_FC_10-05-26/
+├── 14625_cam_A_20260510_0108_part000.mp4   ← left camera, part 0
+├── 14625_cam_A_20260510_0108_part001.mp4
+├── ...
+├── 14625_cam_B_20260510_0108_part000.mp4   ← right camera, part 0
+├── 14625_cam_B_20260510_0108_part001.mp4
+└── ...
+```
+
+- Any numeric prefix before `cam_A` / `cam_B` is handled automatically.
+- Parts are matched by `*cam_A*part*.mp4` / `*cam_B*part*.mp4` and sorted lexicographically.
+- Single-part recordings skip the FFmpeg concatenation step.
+
+```bash
+./run_folder.sh <input_folder> [results_base]
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `input_folder` | — | Folder containing `*cam_A*part*.mp4` and `*cam_B*part*.mp4` |
+| `results_base` | `./results` | Parent directory for output; output goes into `<results_base>/<folder_name>/` |
+
+### Output structure
+
+```
+results/Montrouge_FC_Chaville_FC_10-05-26/
+├── stitched.mp4              ← full H.264 video (720p, CRF 23)
+└── stitched/
+    ├── master.m3u8           ← HLS playlist
+    ├── segment_0000.ts       ← 10-second MPEG-TS segments
+    ├── segment_0001.ts
+    └── ...
+```
+
+Both outputs are always produced:
+
+- **`stitched.mp4`** — for download, review, and archiving.
+- **`stitched/`** — HLS segments ready for streaming (HLS.js, video players, CDN upload).
+
+Debug images (`debug_*.jpg`, `dry_run_*.jpg`) land in the same output folder when enabled.
 
 ---
 

@@ -48,11 +48,15 @@ fi
 
 echo "Detected FPS: $FPS"
 
-# Check if calibration files exist
+# Check if calibration files exist (Docker path or local path)
 USE_CALIBRATION="false"
-if [ -d "/app/params" ] && [ -f "/app/params/camchain_0.yaml" ]; then
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "/app/params/camchain_0.yaml" ]; then
     USE_CALIBRATION="true"
-    echo "Calibration files found, using calibration"
+    echo "Calibration files found at /app/params, using calibration"
+elif [ -f "${SCRIPT_DIR}/params/camchain_0.yaml" ]; then
+    USE_CALIBRATION="true"
+    echo "Calibration files found at ${SCRIPT_DIR}/params, using calibration"
 else
     echo "No calibration files found, using on-the-fly calibration"
 fi

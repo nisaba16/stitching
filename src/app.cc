@@ -37,7 +37,7 @@ App::App(const std::vector<std::string>& video_files, const std::string& output_
         first_image_vector[i].copyTo(first_mat_vector[i]);
     }
 
-    StitchingParamGenerator stitching_param_generator(first_mat_vector, use_calibration_, feature_method_, use_feature_mask_);
+    StitchingParamGenerator stitching_param_generator(first_mat_vector, use_calibration_, feature_method_, use_feature_mask_, output_folder_);
 
     stitching_param_generator.GetReprojParams(
         undist_xmap_vector,
@@ -438,13 +438,13 @@ void App::run_stitching() {
     std::system(mkdir_cmd.c_str());
 
     std::string ffmpeg_cmd = "ffmpeg -y -i \"" + temp_output + "\" "
-                             "-vf scale=-2:720 "
+                             "-vf scale=-2:720"
                              "-c:v libx264 -crf 23 -preset medium "
                              "-pix_fmt yuv420p "
                              "-c:a aac -b:a 128k "
                              "-movflags +faststart "
                              "\"" + final_mp4 + "\" "
-                             "-vf scale=-2:720 "
+                             "-vf scale=-2:720"
                              "-c:v libx264 -crf 23 -preset medium "
                              "-pix_fmt yuv420p "
                              "-c:a aac -b:a 128k "
@@ -483,6 +483,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string output_folder = argv[1];
+    std::system(("mkdir -p \"" + output_folder + "\"").c_str());
     std::string file_name = argv[2];
     double fps = std::stod(argv[3]);
     bool dry_run = (std::string(argv[4]) == "true");

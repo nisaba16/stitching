@@ -19,7 +19,7 @@ using namespace cv;
 using namespace cv::detail;
 
 StitchingParamGenerator::StitchingParamGenerator(
-    const std::vector<cv::Mat>& image_vector, bool use_calibration, const std::string& feature_method, bool use_feature_mask) {
+    const std::vector<cv::Mat>& image_vector, bool use_calibration, const std::string& feature_method, bool use_feature_mask, const std::string& debug_folder) {
 
   std::cout << "[StitchingParamGenerator] Initializing..." << std::endl;
   std::cout << "[StitchingParamGenerator] Use calibration files: " << (use_calibration ? "yes" : "no (on-the-fly)") << std::endl;
@@ -29,6 +29,8 @@ StitchingParamGenerator::StitchingParamGenerator(
   use_calibration_ = use_calibration;
   feature_method_ = feature_method;
   use_feature_mask_ = use_feature_mask;
+  debug_folder_ = debug_folder;
+  std::system(("mkdir -p \"" + debug_folder_ + "\"").c_str());
   num_img_ = image_vector.size();
 
   image_vector_ = image_vector;
@@ -75,10 +77,27 @@ StitchingParamGenerator::StitchingParamGenerator(
       
       cv::Mat K;
       double focal;
-      
+      cv::Size yaml_resolution;
+
       // Read intrinsics (K, focal) from calibration
       fs_read["KMat"] >> K;
       fs_read["focal"] >> focal;
+      fs_read["resolution"] >> yaml_resolution;
+
+      // Scale K and focal from calibration resolution to actual image resolution
+      cv::Size actual_size = image_size_vector_[i];
+      if (yaml_resolution.width > 0 && yaml_resolution.height > 0 &&
+          (actual_size.width != yaml_resolution.width || actual_size.height != yaml_resolution.height)) {
+          double sx = static_cast<double>(actual_size.width)  / yaml_resolution.width;
+          double sy = static_cast<double>(actual_size.height) / yaml_resolution.height;
+          K.at<double>(0, 0) *= sx;  // fx
+          K.at<double>(1, 1) *= sy;  // fy
+          K.at<double>(0, 2) *= sx;  // cx
+          K.at<double>(1, 2) *= sy;  // cy
+          focal *= sx;  // focal scales with fx
+          std::cout << "[InitCameraParam] Scaled K/focal by (" << sx << ", " << sy
+                    << ") from " << yaml_resolution << " → " << actual_size << std::endl;
+      }
 
       // Read the stereo rotation seed: cam0=identity, cam1=R from stereo calibration.
       // This gives the bundle adjuster a correct starting point for the inter-camera angle.
@@ -87,8 +106,22 @@ StitchingParamGenerator::StitchingParamGenerator(
       fs_read["StereoRMat"] >> stereo_R_raw;
       if (!stereo_R_raw.empty()) {
           stereo_R_raw.convertTo(stereo_R, CV_32F);
+
+          // The stereo R contains the true 53° yaw plus small pitch/roll
+          // components (~1.7°) that are calibration noise — the cameras are
+          // physically mounted at the same height on a fixed rig.
+          // Those residual components produce a ~33px vertical seam offset.
+          // Fix: reconstruct R as a pure yaw rotation (preserve azimuth, zero pitch/roll).
+          float yaw = std::atan2(stereo_R.at<float>(0, 2), stereo_R.at<float>(0, 0));
+          float cy = std::cos(yaw), sy = std::sin(yaw);
+          stereo_R = (cv::Mat_<float>(3, 3) <<
+              cy,  0.f, sy,
+              0.f, 1.f, 0.f,
+             -sy,  0.f, cy);
+          std::cout << "[InitCameraParam] Reconstructed stereo R as pure yaw: "
+                    << yaw * 180.f / CV_PI << "°  (removed pitch/roll noise)" << std::endl;
       }
-      
+
       // Set intrinsics and seed rotation; bundle adjuster will refine the rotation.
       camera_params_vector_[i].focal = focal;
       camera_params_vector_[i].aspect = 1.0;
@@ -137,9 +170,9 @@ void StitchingParamGenerator::InitCameraParam() {
     if (feature_method_ == "SIFT") {
         // nfeatures=0 means unlimited; use contrastThreshold/edgeThreshold
         // to keep quality up while allowing more detections.
-        finder = SIFT::create(/*nfeatures=*/5000, /*nOctaveLayers=*/5,
+        finder = SIFT::create(/*nfeatures=*/0, /*nOctaveLayers=*/5,
                               /*contrastThreshold=*/0.03, /*edgeThreshold=*/15, /*sigma=*/1.6);
-        LOGLN("Using SIFT feature detector (5000 features, 5 octave layers)");
+        LOGLN("Using SIFT (unlimited, contrast=0.03, 5 octave layers)");
     } else if (feature_method_ == "AKAZE") {
         // Lower the detection threshold (default 0.001) so we get more
         // keypoints on the low-texture grass.  4 octaves + 5 layers for
@@ -175,7 +208,7 @@ void StitchingParamGenerator::InitCameraParam() {
     // uniform surfaces (grass, sky) by boosting local contrast.
     // Applied per-channel on the Lab L channel to preserve colour.
     {
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(/*clipLimit=*/3.0, /*tileGridSize=*/cv::Size(8, 8));
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(/*clipLimit=*/6.0, /*tileGridSize=*/cv::Size(8, 8));
         for (int i = 0; i < num_img_; ++i) {
             cv::Mat lab, channels[3];
             cv::cvtColor(feature_images[i], lab, cv::COLOR_BGR2Lab);
@@ -236,46 +269,35 @@ void StitchingParamGenerator::InitCameraParam() {
             cv::putText(mask_overlay, "Feature detection area (below red line)", 
                        cv::Point(10, field_start_y + 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, 
                        cv::Scalar(0, 255, 0), 2);
-            std::string mask_path = "../results/debug_feature_mask_" + std::to_string(i) + ".jpg";
+            std::string mask_path = debug_folder_ + "/debug_feature_mask_" + std::to_string(i) + ".jpg";
             cv::imwrite(mask_path, mask_overlay);
             std::cout << "[DEBUG] Saved feature mask: " << mask_path << std::endl;
         }
-    } else if (use_calibration_ && num_img_ == 2) {
-        // Overlap-aware masking: use the known stereo rotation to estimate
-        // which part of each image overlaps with the other.  Only detect
-        // features there — no point wasting keypoints on non-shared content.
-        double yaw_rad = std::atan2(camera_params_vector_[1].R.at<float>(0, 2),
-                                    camera_params_vector_[1].R.at<float>(0, 0));
-        double fov_h = 2.0 * std::atan2(image_size_vector_[0].width / 2.0,
-                                         camera_params_vector_[0].focal);
-        // overlap_frac = (fov - |yaw|) / fov   (symmetric pair)
-        double overlap_frac = std::max(0.0, std::min(1.0,
-                               (fov_h - std::abs(yaw_rad)) / fov_h));
-        // add 10 % safety margin (capped at 1)
-        overlap_frac = std::min(1.0, overlap_frac + 0.10);
+    } else if (num_img_ == 2) {
+        // Overlap-aware masking: for a side-by-side two-camera rig SIFT should
+        // only look in the region where both views share field of view.
+        // Use 20% of image width — tighter than FOV-derived estimates to avoid
+        // features from non-shared content flooding the matcher.
+        const float overlap_frac = 0.20f;
 
-        int rows = feature_images[0].rows;
-        int cols = feature_images[0].cols;
-
-        // Cam 0: overlap is on the RIGHT side
-        int overlap_px_0 = static_cast<int>(cols * overlap_frac);
-        cv::Mat mask0 = cv::Mat::zeros(rows, cols, CV_8U);
-        cv::rectangle(mask0, cv::Rect(cols - overlap_px_0, 0, overlap_px_0, rows),
+        int rows0 = feature_images[0].rows, cols0 = feature_images[0].cols;
+        int overlap_px_0 = static_cast<int>(cols0 * overlap_frac);
+        cv::Mat overlap0 = cv::Mat::zeros(rows0, cols0, CV_8U);
+        cv::rectangle(overlap0, cv::Rect(cols0 - overlap_px_0, 0, overlap_px_0, rows0),
                       cv::Scalar(255), cv::FILLED);
-        mask0.copyTo(feature_masks[0]);
 
-        // Cam 1: overlap is on the LEFT side
-        int overlap_px_1 = static_cast<int>(feature_images[1].cols * overlap_frac);
-        cv::Mat mask1 = cv::Mat::zeros(feature_images[1].rows, feature_images[1].cols, CV_8U);
-        cv::rectangle(mask1, cv::Rect(0, 0, overlap_px_1, feature_images[1].rows),
+        int rows1 = feature_images[1].rows, cols1 = feature_images[1].cols;
+        int overlap_px_1 = static_cast<int>(cols1 * overlap_frac);
+        cv::Mat overlap1 = cv::Mat::zeros(rows1, cols1, CV_8U);
+        cv::rectangle(overlap1, cv::Rect(0, 0, overlap_px_1, rows1),
                       cv::Scalar(255), cv::FILLED);
-        mask1.copyTo(feature_masks[1]);
 
-        std::cout << "[InitCameraParam] Overlap-aware mask: yaw=" << yaw_rad * 180.0 / CV_PI
-                  << "° fov=" << fov_h * 180.0 / CV_PI
-                  << "° overlap=" << overlap_frac * 100.0 << "%"
-                  << " -> cam0 right " << overlap_px_0 << "px, cam1 left " << overlap_px_1 << "px"
-                  << std::endl;
+        overlap0.copyTo(feature_masks[0]);
+        overlap1.copyTo(feature_masks[1]);
+
+        std::cout << "[InitCameraParam] 2-camera overlap mask: " << overlap_frac * 100.0f
+                  << "% (cam0 right " << overlap_px_0 << "px, cam1 left "
+                  << overlap_px_1 << "px)" << std::endl;
 
         // Save overlap mask debug visualizations
         for (int i = 0; i < num_img_; ++i) {
@@ -286,7 +308,7 @@ void StitchingParamGenerator::InitCameraParam() {
             cv::Mat mask_rgb;
             cv::cvtColor(mask_mat_dbg, mask_rgb, cv::COLOR_GRAY2BGR);
             cv::addWeighted(vis, 0.7, mask_rgb, 0.3, 0, vis);
-            std::string path = "../results/debug_overlap_mask_" + std::to_string(i) + ".jpg";
+            std::string path = debug_folder_ + "/debug_overlap_mask_" + std::to_string(i) + ".jpg";
             cv::imwrite(path, vis);
             std::cout << "[DEBUG] Saved overlap mask: " << path << std::endl;
         }
@@ -315,7 +337,7 @@ void StitchingParamGenerator::InitCameraParam() {
         cv::Mat features_vis;
         cv::drawKeypoints(feature_images[i], features[i].keypoints, features_vis, 
                          cv::Scalar(0, 255, 0), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
-        std::string features_path = "../results/debug_features_" + std::to_string(i) + ".jpg";
+        std::string features_path = debug_folder_ + "/debug_features_" + std::to_string(i) + ".jpg";
         cv::imwrite(features_path, features_vis);
         std::cout << "[DEBUG] Saved features visualization: " << features_path << std::endl;
     }
@@ -355,7 +377,7 @@ void StitchingParamGenerator::InitCameraParam() {
             cv::putText(matches_vis, info, cv::Point(10, 30), 
                        cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 255), 2);
             
-            std::string matches_path = "../results/debug_matches_" + 
+            std::string matches_path = debug_folder_ + "/debug_matches_" + 
                                        std::to_string(match_info.src_img_idx) + "_" + 
                                        std::to_string(match_info.dst_img_idx) + ".jpg";
             cv::imwrite(matches_path, matches_vis);
@@ -365,23 +387,34 @@ void StitchingParamGenerator::InitCameraParam() {
         }
     }
 
-    // Check if we have any good matches
+    // Check if we have enough inliers for stable BA.
+    // BundleAdjusterRay needs geometric diversity — 6 collinear matches on a
+    // single white line are not enough; the LM solver degenerates.
+    const int MIN_BA_INLIERS = 20;
     bool has_good_match = false;
+    int total_inliers = 0;
     for (const auto& match_info : pairwise_matches) {
-        // Only warn for actual image pairs (not self-matches)
         if (match_info.src_img_idx != match_info.dst_img_idx) {
+            int inliers = 0;
+            for (size_t k = 0; k < match_info.inliers_mask.size(); ++k)
+                if (match_info.inliers_mask[k]) ++inliers;
+            total_inliers += inliers;
             if (match_info.confidence < conf_thresh) {
-                LOGLN("Warning: Low confidence in feature matches between images " 
-                      << match_info.src_img_idx + 1 << " and " << match_info.dst_img_idx + 1 
-                      << " (confidence: " << match_info.confidence << ", threshold: " << conf_thresh << ")");
-            } else {
-                has_good_match = true;
-                LOGLN("Good match found between images " 
+                LOGLN("Warning: Low confidence between images "
                       << match_info.src_img_idx + 1 << " and " << match_info.dst_img_idx + 1
-                      << " (confidence: " << match_info.confidence << ")");
+                      << " (confidence: " << match_info.confidence
+                      << ", inliers: " << inliers << ")");
+            } else {
+                LOGLN("Match found between images "
+                      << match_info.src_img_idx + 1 << " and " << match_info.dst_img_idx + 1
+                      << " (confidence: " << match_info.confidence
+                      << ", inliers: " << inliers << ")");
             }
         }
     }
+    has_good_match = (total_inliers >= MIN_BA_INLIERS);
+    std::cout << "[InitCameraParam] Total inliers: " << total_inliers
+              << " (need " << MIN_BA_INLIERS << " for BA)" << std::endl;
 
     if (!has_good_match) {
         LOGLN("Error: No good matches found between images. Try:");
@@ -449,18 +482,22 @@ void StitchingParamGenerator::InitCameraParam() {
 
     Ptr<detail::BundleAdjusterBase> adjuster;
     if (use_calibration_) {
-        // Use reproj-based BA so the cost function is sensitive to ppx/ppy.
-        // BundleAdjusterRay ignores the principal point entirely.
-        adjuster = makePtr<detail::BundleAdjusterReproj>();
-        adjuster->setConfThresh(conf_thresh);
-        // Lock focal (0,0), skew (0,1), aspect (1,1).
-        // Unlock ppx (0,2) and ppy (1,2) so the BA can compensate for
-        // small mechanical mounting offsets between cameras.
-        Mat_<uchar> refine_mask = Mat::zeros(3, 3, CV_8U);
-        refine_mask(0, 2) = 1;  // ppx
-        refine_mask(1, 2) = 1;  // ppy
-        adjuster->setRefinementMask(refine_mask);
-        std::cout << "[InitCameraParam] Calibration mode: refining rotation + ppx/ppy via reproj BA" << std::endl;
+        if (has_good_match) {
+            // Ray-based BA: minimises the angle between corresponding rays.
+            // Correct model for a pure-rotation rig; more stable than reproj
+            // when matches are sparse (no depth ambiguity to destabilise it).
+            adjuster = makePtr<detail::BundleAdjusterRay>();
+            adjuster->setConfThresh(conf_thresh);
+            // Refine only rotation (ray BA has no intrinsic refinement mask).
+            Mat_<uchar> refine_mask = Mat::zeros(3, 3, CV_8U);
+            adjuster->setRefinementMask(refine_mask);
+            std::cout << "[InitCameraParam] Calibration mode: refining rotation via ray BA" << std::endl;
+        } else {
+            // No reliable matches (typical on low-texture grass): skip BA entirely
+            // and trust the calibrated R, K from the YAML files.
+            adjuster = makePtr<detail::NoBundleAdjuster>();
+            std::cout << "[InitCameraParam] Calibration mode: no good matches, skipping BA — using calibrated params as-is" << std::endl;
+        }
     } else {
         if (ba_cost_func == "reproj")
             adjuster = makePtr<detail::BundleAdjusterReproj>();
@@ -492,8 +529,11 @@ void StitchingParamGenerator::InitCameraParam() {
     }
 
     if (!(*adjuster)(features, pairwise_matches, camera_params_vector_)) {
-        std::cout << "Camera parameters adjusting failed.\n";
-        assert(false);
+        std::cout << "[InitCameraParam] BA failed — reverting to seed rotations.\n";
+        if (use_calibration_) {
+            for (int i = 0; i < num_img_; ++i)
+                camera_params_vector_[i].R = seed_rotations[i].clone();
+        }
     }
 
     // Post-BA rotation sanity check: for a calibrated stereo rig the inter-camera
@@ -553,14 +593,12 @@ void StitchingParamGenerator::InitCameraParam() {
     for (auto& i : camera_params_vector_)
         rmats.push_back(i.R.clone());
     
-    // Wave correction straightens the panorama horizon. Skip it when using
-    // calibration — the cameras have a known physical tilt and wave correction
-    // would rotate the warp space to compensate, producing huge ROIs.
-    if (!use_calibration_) {
-        waveCorrect(rmats, wave_correct);
-        for (size_t i = 0; i < camera_params_vector_.size(); ++i) {
-            camera_params_vector_[i].R = rmats[i];
-        }
+    // Wave correction levels both cameras to the same horizontal plane.
+    // Apply in all modes — the small pitch residual in the stereo R (~1.7°)
+    // causes a 33-pixel vertical offset at the seam without it.
+    waveCorrect(rmats, wave_correct);
+    for (size_t i = 0; i < camera_params_vector_.size(); ++i) {
+        camera_params_vector_[i].R = rmats[i];
     }
     
     for (size_t i = 0; i < camera_params_vector_.size(); ++i) {
@@ -643,7 +681,7 @@ void StitchingParamGenerator::InitWarper() {
   corners_ = std::vector<cv::Point>(num_img_);
 
   // DEBUG: Save camera parameters to file for analysis
-  std::ofstream debug_cam("../results/debug_camera_params.txt");
+  std::ofstream debug_cam(debug_folder_ + "/debug_camera_params.txt");
   debug_cam << "=== Camera Parameters Debug ===" << std::endl;
   debug_cam << "Median focal length: " << median_focal_length << std::endl;
   debug_cam << "Warp type: " << warp_type << std::endl << std::endl;
@@ -688,6 +726,136 @@ void StitchingParamGenerator::InitWarper() {
     rotation_warper_->warp(image_vector_[img_idx], K,
                            camera_params_vector_[img_idx].R,
                            INTER_LINEAR, BORDER_CONSTANT, images_warped[img_idx]);
+  }
+
+  // Sub-pixel alignment: find the residual vertical (and horizontal) shift
+  // between the two warped images in their overlap zone.
+  // Strategy: try line matching first (geometry-based, best for football pitches
+  // with painted line markings), fall back to phase correlation if insufficient lines.
+  if (num_img_ == 2) {
+      cv::Mat wc0, wc1;
+      images_warped[0].copyTo(wc0);
+      images_warped[1].copyTo(wc1);
+
+      // Grayscale copies for correlation
+      cv::Mat wg0, wg1;
+      cv::cvtColor(wc0, wg0, cv::COLOR_BGR2GRAY);
+      cv::cvtColor(wc1, wg1, cv::COLOR_BGR2GRAY);
+
+      // Overlap zone in panorama coordinates
+      int x0s = corners_[0].x, x0e = x0s + wg0.cols;
+      int x1s = corners_[1].x, x1e = x1s + wg1.cols;
+      int ols = std::max(x0s, x1s);
+      int ole = std::min(x0e, x1e);
+
+      if (ole > ols + 100) {
+          int c0 = ols - x0s;
+          int c1 = ols - x1s;
+          int olw = ole - ols;
+          int h   = std::min(wg0.rows, wg1.rows);
+          int y0off = (wg0.rows - h) / 2;
+          int y1off = (wg1.rows - h) / 2;
+
+          // ── Phase correlation ─────────────────────────────────────────────
+          cv::Mat s0f, s1f;
+          wg0(cv::Rect(c0, y0off, olw, h)).convertTo(s0f, CV_32F);
+          wg1(cv::Rect(c1, y1off, olw, h)).convertTo(s1f, CV_32F);
+          cv::Mat hann;
+          cv::createHanningWindow(hann, s0f.size(), CV_32F);
+          double pc_response;
+          cv::Point2d pc_shift = cv::phaseCorrelate(s0f, s1f, hann, &pc_response);
+          std::cout << "[Align] Phase-correlation: dx=" << pc_shift.x
+                    << " dy=" << pc_shift.y << " response=" << pc_response << std::endl;
+
+          // ── Line matching ─────────────────────────────────────────────────
+          // Extract colour overlap strips for line detection
+          cv::Mat ov0 = wc0(cv::Rect(c0, y0off, olw, h)).clone();
+          cv::Mat ov1 = wc1(cv::Rect(c1, y1off, olw, h)).clone();
+
+          // Threshold for white painted lines
+          cv::Mat wb0, wb1;
+          cv::threshold(wg0(cv::Rect(c0, y0off, olw, h)), wb0, 200, 255, cv::THRESH_BINARY);
+          cv::threshold(wg1(cv::Rect(c1, y1off, olw, h)), wb1, 200, 255, cv::THRESH_BINARY);
+
+          // HoughLinesP on white-pixel mask
+          std::vector<cv::Vec4i> segs0, segs1;
+          cv::HoughLinesP(wb0, segs0, 1, CV_PI / 180.0, 30, 80, 20);
+          cv::HoughLinesP(wb1, segs1, 1, CV_PI / 180.0, 30, 80, 20);
+          std::cout << "[Align] Line segments: cam0=" << segs0.size()
+                    << " cam1=" << segs1.size() << std::endl;
+
+          // Match lines by angle similarity, collect dy between midpoints
+          auto seg_angle = [](const cv::Vec4i& s) {
+              return std::atan2(float(s[3]-s[1]), float(s[2]-s[0])) * 180.f / CV_PI;
+          };
+          auto seg_midy = [](const cv::Vec4i& s) {
+              return (s[1] + s[3]) * 0.5f;
+          };
+
+          const float ANGLE_TOL = 8.0f;
+          std::vector<float> dy_candidates;
+          for (const auto& s0 : segs0) {
+              float a0 = seg_angle(s0);
+              float best_da = ANGLE_TOL + 1.f;
+              float best_dy = 0.f;
+              for (const auto& s1 : segs1) {
+                  float da = std::abs(a0 - seg_angle(s1));
+                  if (da > 90.f) da = 180.f - da;
+                  if (da < best_da) {
+                      best_da = da;
+                      best_dy = (seg_midy(s0) + y0off) - (seg_midy(s1) + y1off);
+                  }
+              }
+              if (best_da < ANGLE_TOL)
+                  dy_candidates.push_back(best_dy);
+          }
+          std::cout << "[Align] Matched line pairs: " << dy_candidates.size() << std::endl;
+
+          // ── Pick best correction ──────────────────────────────────────────
+          int apply_dx = 0, apply_dy = 0;
+          bool used_lines = false;
+
+          if (dy_candidates.size() >= 3) {
+              // Geometry-based: use median dy from matched field lines
+              std::sort(dy_candidates.begin(), dy_candidates.end());
+              float median_dy = dy_candidates[dy_candidates.size() / 2];
+              apply_dy = static_cast<int>(std::round(median_dy));
+              used_lines = true;
+              std::cout << "[Align] Using line matching: dy=" << apply_dy
+                        << " (from " << dy_candidates.size() << " pairs)" << std::endl;
+
+              // Save debug image: detected lines in both overlap strips
+              cv::Mat vis0 = ov0.clone(), vis1 = ov1.clone();
+              for (const auto& s : segs0)
+                  cv::line(vis0, {s[0],s[1]}, {s[2],s[3]}, {0,255,0}, 2);
+              for (const auto& s : segs1)
+                  cv::line(vis1, {s[0],s[1]}, {s[2],s[3]}, {0,255,0}, 2);
+              cv::Mat vis;
+              cv::vconcat(vis0, vis1, vis);
+              std::string dbg_path = debug_folder_ + "/debug_line_align.jpg";
+              cv::imwrite(dbg_path, vis);
+              std::cout << "[Align] Saved line debug: " << dbg_path << std::endl;
+
+          } else if (pc_response > 0.05) {
+              // Intensity-based fallback
+              apply_dx = static_cast<int>(std::round(pc_shift.x));
+              apply_dy = static_cast<int>(std::round(pc_shift.y));
+              std::cout << "[Align] Using phase correlation: dx=" << apply_dx
+                        << " dy=" << apply_dy << std::endl;
+          } else {
+              std::cout << "[Align] No reliable alignment signal — keeping calibration corners" << std::endl;
+          }
+
+          if (apply_dx != 0 || apply_dy != 0) {
+              corners_[1].x += apply_dx;
+              corners_[1].y += apply_dy;
+              if (std::abs(apply_dy) > 0)
+                  image_warped_size_vector_[1].height = std::max(
+                      1, image_warped_size_vector_[1].height - std::abs(apply_dy));
+              std::cout << "[Align] Applied: used_lines=" << used_lines
+                        << " dx=" << apply_dx << " dy=" << apply_dy << std::endl;
+          }
+      }
   }
 
   // Compute exposure compensation gains from warped sample images
@@ -769,7 +937,7 @@ void StitchingParamGenerator::InitWarper() {
   const int MAX_ROI_OFFSET = 50000;     // Maximum reasonable offset from origin
   
   // DEBUG: Open ROI debug file
-  std::ofstream debug_roi("../results/debug_roi_info.txt");
+  std::ofstream debug_roi(debug_folder_ + "/debug_roi_info.txt");
   debug_roi << "=== ROI Debug Information ===" << std::endl;
   
   Point roi_tl_bias(999999, 999999);
@@ -795,7 +963,7 @@ void StitchingParamGenerator::InitWarper() {
       double scale = std::min(2000.0 / warped_vis.cols, 2000.0 / warped_vis.rows);
       cv::resize(warped_vis, warped_vis, cv::Size(), scale, scale);
     }
-    std::string warped_path = "../results/debug_warped_" + std::to_string(i) + ".jpg";
+    std::string warped_path = debug_folder_ + "/debug_warped_" + std::to_string(i) + ".jpg";
     cv::imwrite(warped_path, warped_vis);
     std::cout << "[DEBUG] Saved warped image: " << warped_path << " (corner: " << corner << ")" << std::endl;
     debug_roi << "  Warp corner: " << corner << std::endl;
@@ -953,20 +1121,32 @@ void StitchingParamGenerator::InitUndistortMap() {
   for (size_t i = 0; i < num_img_; i++) {
     cv::Mat K_float, R_identity;
     k_vector[i].getMat(cv::ACCESS_READ).convertTo(K_float, CV_32F);
-    
-    // Use identity rotation for undistortion (no rotation needed during undistortion)
+
+    // Scale K from calibration resolution to actual image resolution.
+    // Calibration was performed at a different resolution than the recording —
+    // focal length and principal point are in calibration-pixel units and must
+    // be rescaled before use with full-size frames.
+    cv::Size actual_size = image_size_vector_[i];
+    double sx = static_cast<double>(actual_size.width)  / resolution.width;
+    double sy = static_cast<double>(actual_size.height) / resolution.height;
+    K_float.at<float>(0, 0) *= sx;  // fx
+    K_float.at<float>(1, 1) *= sy;  // fy
+    K_float.at<float>(0, 2) *= sx;  // cx
+    K_float.at<float>(1, 2) *= sy;  // cy
+    std::cout << "[InitUndistortMap] Scaling K by (" << sx << ", " << sy
+              << ") from " << resolution << " → " << actual_size << std::endl;
+
+    // Store the scaled K back so InitCameraParam can read it cleanly
+    // (both functions load from YAML independently, so we scale in both places)
+    k_vector[i] = cv::UMat();
+    K_float.copyTo(k_vector[i]);
+
     R_identity = cv::Mat::eye(3, 3, CV_32F);
-    
-    // Use the ORIGINAL K as the output camera matrix so that the
-    // undistorted image lives in the same coordinate space as the
-    // warper's K (which also comes from the YAML).  Using
-    // getOptimalNewCameraMatrix here would shift focal / principal-point
-    // and create a mismatch with the cylindrical warper, causing
-    // extreme distortion at the edges when the maps are composed.
+
     cv::initUndistortRectifyMap(
-        K_float, d_vector[i], R_identity, K_float, resolution,
+        K_float, d_vector[i], R_identity, K_float, actual_size,
         CV_32FC1, undist_xmap_vector_[i], undist_ymap_vector_[i]);
-    
+
     std::cout << "[InitUndistortMap] Created undistortion map for camera " << i << std::endl;
   }
 }
